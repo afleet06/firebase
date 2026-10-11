@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Control de Acceso y Puerta</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Librería QR -->
+    <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
+    <!-- Firebase App y Firestore (SDK Compat) -->
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore-compat.js"></script>
+</head>
+<body class="bg-slate-900 text-white min-h-screen flex flex-col items-center p-4">
+
+    <div class="w-full max-w-lg bg-slate-800 rounded-2xl shadow-xl p-6 border border-slate-700 mt-4">
+        <h1 class="text-2xl font-bold text-center mb-4 text-emerald-400">Control de Acceso 🚪</h1>
+        
+        <!-- Pestañas de Navegación -->
+        <div class="flex border-b border-slate-700 mb-6">
+            <button onclick="cambiarTab('escanear')" id="btn-escanear" class="flex-1 py-2 text-center font-semibold border-b-2 border-emerald-500 text-emerald-400 transition-all">📸 Escáner QR</button>
+            <button onclick="cambiarTab('lista')" id="btn-lista" class="flex-1 py-2 text-center font-semibold text-slate-400 transition-all">📋 Lista de Invitados</button>
+        </div>
+
+        <!-- SECCIÓN 1: ESCÁNER -->
+        <div id="seccion-escanear" class="space-y-4">
+            <div id="reader" class="w-full overflow-hidden rounded-xl border border-slate-600 bg-black min-h-[300px]"></div>
+
+            <div id="result-container" class="hidden p-4 rounded-xl text-center transition-all">
+                <p id="result-title" class="text-xl font-bold"></p>
+                <p id="result-name" class="text-lg mt-1"></p>
+                <p id="result-time" class="text-sm text-slate-300 mt-1"></p>
+            </div>
+
+            <button onclick="reiniciarEscaneo()" class="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-semibold py-3 px-4 rounded-xl transition-all">
+                Escanear Siguiente Pase
+            </button>
+        </div>
+
+        <!-- SECCIÓN 2: LISTA DE INVITADOS -->
+        <div id="seccion-lista" class="hidden space-y-4">
+            <input type="text" id="buscador" placeholder="Buscar por nombre o código..." onkeyup="filtrarInvitados()" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-emerald-500">
+            
+            <div class="flex justify-between text-xs text-slate-400 px-1">
+                <span id="contador-asistidos">Asistidos: 0 / 0</span>
+                <button onclick="cargarInvitados()" class="text-emerald-400 hover:underline">🔄 Actualizar</button>
+            </div>
+
+            <div id="tabla-invitados" class="space-y-2 max-h-[400px] overflow-y-auto pr-1">
+                <!-- Se llena con JavaScript -->
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // PEGA TUS CREDENCIALES DE FIREBASE AQUÍ
+        const firebaseConfig = {
+            apiKey: "AIzaSyBapaBjZ27kSreg0NocQOmnm1TVeEcXN2A",
+            authDomain: "invitaciones-3b8f4.firebaseapp.com",
+            projectId: "invitaciones-3b8f4",
+            storageBucket: "invitaciones-3b8f4.firebasestorage.app",
+            messagingSenderId: "229220213328",
+            appId: "1:229220213328:web:269edad4c8236ebb6f6755"
+        };
+
+        firebase.initializeApp(firebaseConfig);
+        const db = firebase.firestore();
+
+        let html5QrCode;
+        let escaneando = true;
+        let isProcessing = false; // Bloqueo estricto anti-rebote
+        let listaGlobalInvitados = [];
+
+        function cambiarTab(tab) {
+            const secEscanear = document.getElementById('seccion-escanear');
+            const secLista = document.getElementById('seccion-lista');
+            const btnEscanear = document.getElementById('btn-escanear');
+            const btnLista = document.getElementById('btn-lista');
+
+            if (tab === 'escanear') {
+                secEscanear.classList.remove('hidden');
+                secLista.classList.add('hidden');
+                btnEscanear.className = "flex-1 py-2 text-center font-semibold border-b-2 border-emerald-500 text-emerald-400 transition-all";
+                btnLista.className = "flex-1 py-2 text-center font-semibold text-slate-400 transition-all";
+            } else {
+                secEscanear.classList.add('hidden');
+                secLista.classList.remove('hidden');
+                btnLista.className = "flex-1 py-2 text-center font-semibold border-b-2 border-emerald-500 text-emerald-400 transition-all";
+                btnEscanear.className = "flex-1 py-2 text-center font-semibold text-slate-400 transition-all";
+                cargarInvitados();
+            }
+        }
+
+        function onScanSuccess(decodedText) {
+            // Si ya está procesando o pausado, ignora cualquier lectura fantasma
+            if (!escaneando || isProcessing) return;
+            
+            isProcessing = true;
+            escaneando = false;
+            html5QrCode.pause();
+            validarYRegistrarAsistencia(decodedText);
+        }
+
+        async function validarYRegistrarAsistencia(codigo) {
+            const container = document.getElementById('result-container');
+            const title = document.getElementById('result-title');
+            const name = document.getElementById('result-name');
+            const time = document.getElementById('result-time');
+            
+            container.classList.remove('hidden', 'bg-emerald-900', 'bg-red-900', 'bg-yellow-900');
+
+            try {
+                const docRef = db.collection('invitados').doc(codigo);
+                const docSnap = await docRef.get();
+
+                if (!docSnap.exists) {
+                    container.classList.add('bg-red-900', 'border', 'border-red-600');
+                    title.innerText = "❌ CÓDIGO INVÁLIDO";
+                    name.innerText = "Este pase no existe.";
+                    time.innerText = "";
+                    return;
+                }
+
+                const invitado = docSnap.data();
+
+                if (invitado.asistio) {
+                    container.classList.add('bg-yellow-900', 'border', 'border-yellow-600');
+                    title.innerText = "⚠️ ACCESO DUPLICADO";
+                    name.innerText = invitado.nombre;
+                    let horaStr = invitado.fecha_asistencia ? new Date(invitado.fecha_asistencia.toDate()).toLocaleTimeString() : 'Hace un momento';
+                    time.innerText = `Ingresó previamente a las: ${horaStr}`;
+                    return;
+                }
+
+                const ahora = new Date();
+                await docRef.update({ 
+                    asistio: true, 
+                    fecha_asistencia: ahora 
+                });
+
+                container.classList.add('bg-emerald-900', 'border', 'border-emerald-600');
+                title.innerText = "✅ ACCESO CONCEDIDO";
+                name.innerText = invitado.nombre;
+                time.innerText = `Registrado a las: ${ahora.toLocaleTimeString()}`;
+            } catch (error) {
+                console.error(error);
+                container.classList.add('bg-red-900', 'border', 'border-red-600');
+                title.innerText = "❌ ERROR DE CONEXIÓN";
+                name.innerText = "No se pudo validar el pase.";
+                time.innerText = "";
+            }
+        }
+
+    function reiniciarEscaneo() {
+            document.getElementById('result-container').classList.add('hidden');
+            escaneando = true;
+            isProcessing = false; // Libera el bloqueo para el siguiente escaneo
+            html5QrCode.resume();
+        }
+
+        async function cargarInvitados() {
+            try {
+                const querySnapshot = await db.collection('invitados').orderBy('nombre', 'asc').get();
+                listaGlobalInvitados = [];
+                querySnapshot.forEach((doc) => {
+                    listaGlobalInvitados.push({ id: doc.id, ...doc.data() });
+                });
+                renderizarTabla(listaGlobalInvitados);
+            } catch (error) {
+                console.error("Error cargando invitados:", error);
+            }
+        }
+
+        function renderizarTabla(invitados) {
+            const contenedor = document.getElementById('tabla-invitados');
+            contenedor.innerHTML = '';
+
+            let asistidosCount = 0;
+
+            invitados.forEach(inv => {
+                if (inv.asistio) asistidosCount++;
+
+                const div = document.createElement('div');
+                div.className = "flex items-center justify-between bg-slate-900 p-3 rounded-xl border border-slate-700 text-sm";
+                div.innerHTML = `
+                    <div>
+                        <p class="font-bold text-white">${inv.nombre}</p>
+                        <p class="text-xs text-slate-400">Código: ${inv.codigo_qr}</p>
+                    </div>
+                    <div>
+                        ${inv.asistio 
+                            ? '<span class="bg-emerald-900 text-emerald-300 px-2 py-1 rounded-lg text-xs font-semibold">Asistió</span>' 
+                            : `<button onclick="marcarManual('${inv.codigo_qr}')" class="bg-slate-700 hover:bg-emerald-600 text-white px-3 py-1 rounded-lg text-xs transition-all">Acceso Manual</button>`
+                        }
+                    </div>
+                `;
+                contenedor.appendChild(div);
+            });
+
+            document.getElementById('contador-asistidos').innerText = `Asistidos: ${asistidosCount} / ${invitados.length}`;
+        }
+
+        function filtrarInvitados() {
+            const texto = document.getElementById('buscador').value.toLowerCase();
+            const filtrados = listaGlobalInvitados.filter(inv => 
+                inv.nombre.toLowerCase().includes(texto) || inv.codigo_qr.toLowerCase().includes(texto)
+            );
+            renderizarTabla(filtrados);
+        }
+
+        async function marcarManual(codigo) {
+            if (!confirm("¿Deseas dar acceso manual a este invitado?")) return;
+            
+            try {
+                const ahora = new Date();
+                await db.collection('invitados').doc(codigo).update({ 
+                    asistio: true, 
+                    fecha_asistencia: ahora 
+                });
+                cargarInvitados();
+            } catch (error) {
+                console.error("Error al marcar manual:", error);
+            }
+        }
+
+        document.addEventListener("DOMContentLoaded", () => {
+            html5QrCode = new Html5Qrcode("reader");
+            const config = { fps: 10, qrbox: { width: 250, height: 250 } };
+            
+            html5QrCode.start({ facingMode: "environment" }, config, onScanSuccess)
+                .catch(err => {
+                    console.error("Cámara no iniciada:", err);
+                });
+        });
+    </script>
+</body>
+</html>
